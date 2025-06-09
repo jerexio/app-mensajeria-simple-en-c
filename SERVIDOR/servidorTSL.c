@@ -46,7 +46,6 @@ void *job(void *index){
     do{
             memset(client[i].send_buffer,0,sizeof(client[i].send_buffer));
             rval=SSL_read(client[i].cli_ssl,client[i].send_buffer,1024);
-            //DESENCRIPTAR CON LA CLAVE PRIVADA SV
             if (rval<0){
                 SSL_write(client[i].cli_ssl,"Mensaje no recibido",19);
             }
@@ -54,10 +53,11 @@ void *job(void *index){
                 if(strcmp(client[i].send_buffer, "QUIT\n") == 0){//El cliente se hace cargo de mandar el QUIT
                     conection_state = 0;
                 }else{
-                    printf("%s",client[i].send_buffer); 
+                    printf("Mensaje recibido \n");
+                    //printf("%s",client[i].send_buffer);
+                    //printf("\n");
                     for(int j=0; j < N_CLIENTES; j++){
                         if(j != i ){
-                            //ENCRIPTAR CON LA CLAVE PUBLICA DEL USUARIO I
                             SSL_write(client[j].cli_ssl,client[i].send_buffer,strlen(client[i].send_buffer));
                         }
                     }
