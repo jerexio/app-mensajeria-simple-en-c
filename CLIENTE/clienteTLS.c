@@ -12,10 +12,12 @@
 #include <openssl/conf.h>
 #include "encriptador.h"
 #include "desencriptador.h"
-#include "clave_publica_send_recv.h"
+#include <openssl/evp.h>
+#include <openssl/rsa.h>
+#include <openssl/engine.h>
 
 #define MAX_TO_SEND 96
-#define SIZE_MSG 480
+#define SIZE_MSG 1024
 #define SIZE_SEND_RECV SIZE_MSG+EVP_MAX_BLOCK_LENGTH
 
 SSL *ssl = NULL; // Almaceno la representacion de la conexion TSL
@@ -36,6 +38,10 @@ Keys claves;
 EVP_PKEY *priv_key;
 EVP_PKEY **pub_key;
 
+EVP_PKEY_CTX *pub_ctx;
+EVP_PKEY_CTX *priv_ctx;
+
+BIO *bio = NULL;     // BASIC IO para SSL
 
 unsigned char *dencrypted_key;
 int dencrypted_key_len;
@@ -43,69 +49,171 @@ int dencrypted_key_len;
 
 //Funcion para recibir mensajes y mostrarlos por pantalla
 void *read_text(void *args){
-    int rval, 
+    uint32_t rval, 
         ciphertext_len,
         encrypted_key_len = 32,
-        len_recv_buffer;
+        len_recv_buffer,
+        cipherkey_len,
+        ciphermsg_len,
+        total_read;
+    size_t encriptedkey_len;
     unsigned char *encrypted_key = (unsigned char *)malloc(32);
-    unsigned char *ciphertext = (unsigned char *)malloc(SIZE_SEND_RECV);
+    unsigned char *ciphertext, *cipher_ptr, *ptr_coso;
     unsigned char iv[EVP_MAX_IV_LENGTH];
+    unsigned char *cipherkey;
+    unsigned char *ciphermsg;
+    unsigned char *encriptedkey, *ptr_encriptedkey;
+    
+    
+    priv_ctx = EVP_PKEY_CTX_new(priv_key, NULL);
+    if (!priv_ctx){
+        printf("Fallo al definir el contexto para clave privada\n");
+        exit(1);
+    }
+
     do{
         printf("Ready to recv\n");
-        memset(&ciphertext_len, 0, sizeof(int));
+        memset(&ciphertext_len, 0, sizeof(uint32_t));
         memset(encrypted_key, 0, 32);
-        memset(ciphertext, 0, SIZE_SEND_RECV);
         memset(iv, 0, EVP_MAX_IV_LENGTH);
-
-        rval = SSL_read(ssl, &ciphertext_len, sizeof(int));
-
+        memset(recv_buffer, 0, SIZE_SEND_RECV);
+        
+        ciphertext_len = 0;
+        rval = SSL_read(ssl, &ciphertext_len, sizeof(uint32_t));
+        ciphertext = (unsigned char *)malloc(ciphertext_len);
         if(rval > 0){
-            rval = SSL_read(ssl, iv, EVP_MAX_IV_LENGTH);
 
-            if(rval > 0){
-                SSL_read(ssl, encrypted_key, encrypted_key_len);
-                rval = SSL_read(ssl, ciphertext, ciphertext_len);
-                if(rval > 0){
-                    len_recv_buffer = desencriptar(ciphertext, ciphertext_len, encrypted_key, iv, recv_buffer);
-                    printf("%s",recv_buffer);
+            rval = SSL_read(ssl, ciphertext, ciphertext_len);
+
+            if(rval >= 0){
+                cipher_ptr = ciphertext;
+                
+                //Desarmo el paquete recibido
+                memcpy(&cipherkey_len, cipher_ptr, sizeof(uint32_t));
+                cipher_ptr += sizeof(uint32_t);
+                cipherkey = (unsigned char *)malloc(cipherkey_len);
+                memcpy(cipherkey, cipher_ptr, cipherkey_len);
+                cipher_ptr += cipherkey_len;
+                memcpy(&ciphermsg_len, cipher_ptr, sizeof(uint32_t));
+                cipher_ptr += sizeof(uint32_t);
+                ciphermsg = (unsigned char *) malloc(ciphermsg_len);
+                memcpy(ciphermsg, cipher_ptr, ciphermsg_len);
+
+                //Desencripto el bloque de la clave con mi clave privada
+                if (EVP_PKEY_decrypt_init(priv_ctx) <= 0){
+                    printf("Fallo al iniciar el contexto para clave privada\n");
+                    exit(1);
                 }
-                free(ciphertext);
+                if (EVP_PKEY_decrypt(priv_ctx, NULL, &encriptedkey_len, cipherkey, cipherkey_len) <= 0){
+                    printf("Fallo al testear desencriptar\n");
+                    exit(1);
+                }
+                encriptedkey = (unsigned char *)malloc(encriptedkey_len);
+                if (EVP_PKEY_decrypt(priv_ctx, encriptedkey, &encriptedkey_len, cipherkey, cipherkey_len) <= 0){
+                    printf("Fallo al desencriptar\n");
+                    exit(1);
+                }
+                
+                //Extraigo la clave y el vector
+                ptr_encriptedkey = encriptedkey;
+                memcpy(iv, ptr_encriptedkey, EVP_MAX_IV_LENGTH);
+                ptr_encriptedkey += EVP_MAX_IV_LENGTH;
+                memcpy(encrypted_key, ptr_encriptedkey, encrypted_key_len);
+                ptr_encriptedkey += encrypted_key_len;
+
+                len_recv_buffer = desencriptar(ciphermsg, ciphermsg_len, encrypted_key, iv, recv_buffer);
+                printf("%s",recv_buffer);
             }
         }
+        free(ciphertext);
     }while(conection_state);
 }
 
 //Funcion para enviar un mensaje al chat
 void *write_text(void *args){
-    int rval,
+    uint32_t rval,
         ciphertext_len,
-        encrypted_key_len = 32;
-    unsigned char **encrypted_key;
+        encrypted_key_len = 32,
+        buffer_actual_size,
+        buffer_key_size,
+        chunk_size, bytes_sent, total_sent;
+    size_t cipherkey_len;
+    unsigned char *buffer_key, *ptr_buffer_key;
+    unsigned char *buffer_actual, *ptr_buffer;
+    unsigned char *encrypted_key, *cipherkey;
     unsigned char *ciphertext;
     unsigned char iv[EVP_MAX_IV_LENGTH];
 
-    encrypted_key = (unsigned char **)malloc(2 * sizeof(unsigned char *));
-    for (int i = 0; i < 2; i++)
-    {
-        encrypted_key[i] = (unsigned char *)malloc(32);
-    }
+    encrypted_key = (unsigned char *)malloc(32);
     ciphertext = (unsigned char *)malloc(SIZE_SEND_RECV);
+    buffer_key_size = EVP_MAX_IV_LENGTH + encrypted_key_len;
+    buffer_key = (unsigned char *)malloc(buffer_key_size);
 
+    pub_ctx = EVP_PKEY_CTX_new(pub_key[(user_nro + 1) % 2], NULL);
+    if (!pub_ctx){
+        printf("Fallo al definir el contexto para clave publica\n");
+        exit(1);
+    }
+    
     do{
         printf("Ready to send\n");
         memset(send_buffer,0, SIZE_SEND_RECV);
         memset(ciphertext, 0, SIZE_SEND_RECV);
         fgets(send_buffer, SIZE_SEND_RECV, stdin);
-        ciphertext_len = encriptar(send_buffer, strlen(send_buffer),
-              encrypted_key[(user_nro+1)%2], iv,
-              ciphertext);
+        if(strcmp(send_buffer, "QUIT\n") != 0){//El cliente se hace cargo de mandar el QUIT
 
-        SSL_write(ssl, &ciphertext_len, sizeof(int));
-        SSL_write(ssl, iv, EVP_MAX_IV_LENGTH);
-        SSL_write(ssl, encrypted_key[(user_nro+1)%2], encrypted_key_len); //El (user_nro+1)%2 solo se puede usar porque son 2 usuarios
-        SSL_write(ssl, ciphertext, ciphertext_len);
+            ciphertext_len = encriptar(send_buffer, strlen(send_buffer),
+                encrypted_key, iv,
+                ciphertext);
+            
+            //Creo un bloque que contiene la clave y el vector de inicializacion
+            memset(buffer_key, 0, buffer_key_size);
+            ptr_buffer_key = buffer_key;
+            memcpy(ptr_buffer_key, iv, EVP_MAX_IV_LENGTH);
+            ptr_buffer_key += EVP_MAX_IV_LENGTH;
+            memcpy(ptr_buffer_key, encrypted_key, encrypted_key_len);
+            ptr_buffer_key += encrypted_key_len;
 
-        if(strcmp(send_buffer, "QUIT\n") == 0){//El cliente se hace cargo de mandar el QUIT
+            
+            //Encripto con clave publica la clave del mensaje
+            if(1 != EVP_PKEY_encrypt_init(pub_ctx)){
+                printf("FALLO al inicio\n");
+                exit(1);
+            }
+            EVP_PKEY_encrypt(pub_ctx, NULL, &cipherkey_len, buffer_key, buffer_key_size);
+            cipherkey = (unsigned char *)malloc(cipherkey_len);
+            if (!cipherkey) {
+                perror("FALLO CIPHERKEY");
+                exit(1);
+            }
+            EVP_PKEY_encrypt(pub_ctx, cipherkey, &cipherkey_len, buffer_key, buffer_key_size);
+
+            //Creo el paquete con la clave encriptada y el mensaje encriptado
+            buffer_actual_size = sizeof(uint32_t) + cipherkey_len + sizeof(uint32_t) + ciphertext_len;
+            buffer_actual = (unsigned char *)malloc(buffer_actual_size);
+            ptr_buffer = buffer_actual;
+            memcpy(ptr_buffer, &cipherkey_len, sizeof(uint32_t));
+            ptr_buffer += sizeof(uint32_t);
+            memcpy(ptr_buffer, cipherkey, cipherkey_len);
+            ptr_buffer += cipherkey_len;
+            memcpy(ptr_buffer, &ciphertext_len, sizeof(uint32_t));
+            ptr_buffer += sizeof(uint32_t);
+            memcpy(ptr_buffer, ciphertext, ciphertext_len);
+
+/*            
+            // Enviamos todo junto
+            for (size_t i = 0; i < buffer_actual_size; i++) {
+                printf("%02X ", buffer_actual[i]);
+            }*/
+            //Envio el tamaño del buffer y el buffer
+            SSL_write(ssl, &buffer_actual_size, sizeof(uint32_t));
+            SSL_write(ssl, buffer_actual, buffer_actual_size);
+            free(buffer_actual);
+            free(cipherkey);
+        }
+        else{
+            SSL_write(ssl, send_buffer, 5);
+
             conection_state = 0;
         }
     }while(conection_state);
@@ -169,7 +277,6 @@ int main(int argc, char *argv[])
     pthread_t r_thread, w_thread;
 
     SSL_CTX *ctx = NULL; // Almaceno los contextos
-    BIO *bio = NULL;     // BASIC IO para SSL
 
     if (argc < 6)
     {
@@ -284,7 +391,7 @@ int main(int argc, char *argv[])
     }
     /*******************************************************************************/
     
-    fp = fopen("./external_pub_key/other_pub_key.pem", "r");
+    fp = fopen(argv[6], "r");
     if (!fp)
     {
         perror("fopen");

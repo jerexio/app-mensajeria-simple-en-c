@@ -1,6 +1,6 @@
 CC=gcc
-OBJETOS=clienteTLS.o encriptador.o desencriptador.o
-APP=clienteTLS
+OBJETOS=servidorTSL.o
+APP=servidorTSL
 CFLAGS = -lssl -lcrypto -lpthread
 
 # $@:Se sustituye por el nombre del objetivo de la presente regla.

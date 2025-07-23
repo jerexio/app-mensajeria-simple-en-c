@@ -18,6 +18,7 @@
 #include <openssl/ssl.h>
 
 #define N_CLIENTES 10
+#define LIMITE_DATOS 4096
 
 /*
 Estructura Cliente
@@ -28,10 +29,9 @@ typedef struct {
     struct sockaddr_in cli_addr;
     socklen_t clilen;
     int cli_sockfd;
-    char send_buffer[1024];
-    char recv_buffer[1024];
+    unsigned char send_buffer[LIMITE_DATOS];
+    unsigned char recv_buffer[LIMITE_DATOS];
     pthread_t cli_thread;
-    char username[4];
     SSL *cli_ssl; //El socket de este cliente para la conexion ssl
     int state;
 } Client;
@@ -45,7 +45,7 @@ void *job(void *index){
     memset(client[i].recv_buffer,0,sizeof(client[i].recv_buffer));
     do{
             memset(client[i].send_buffer,0,sizeof(client[i].send_buffer));
-            rval=SSL_read(client[i].cli_ssl,client[i].send_buffer,1024);
+            rval=SSL_read(client[i].cli_ssl,client[i].send_buffer, LIMITE_DATOS);
             if (rval<0){
                 SSL_write(client[i].cli_ssl,"Mensaje no recibido",19);
             }
@@ -54,11 +54,9 @@ void *job(void *index){
                     conection_state = 0;
                 }else{
                     printf("Mensaje recibido \n");
-                    //printf("%s",client[i].send_buffer);
-                    //printf("\n");
                     for(int j=0; j < N_CLIENTES; j++){
                         if(j != i ){
-                            SSL_write(client[j].cli_ssl,client[i].send_buffer,strlen(client[i].send_buffer));
+                            SSL_write(client[j].cli_ssl,client[i].send_buffer, rval);
                         }
                     }
                 }
@@ -85,7 +83,7 @@ static SSL_CTX *create_server_context(const char *ca_pem, const char *cert_pem, 
 		return NULL;
     }
 
-    //Cargo el CA del cliente
+    //Cargo el CA para validar clientes
     SSL_CTX_set_client_CA_list(ctx, SSL_load_client_CA_file(ca_pem));
 
     //Defino el certificado del server firmado por CA
@@ -206,7 +204,6 @@ int main(int argc, char *argv[])
         memset(client[i].send_buffer,0,sizeof(client[i].send_buffer));
         //Recibo bytes del cliente usando el SSL
         rval = SSL_read(client[i].cli_ssl, client[i].recv_buffer, sizeof(client[i].recv_buffer));
-        /* ACA INTERCAMBIAR CLAVES PUBLICAS USER-SERVER (Archivos) */
         if(strcmp(client[i].send_buffer, "HELLO")){
             //Recibo bytes del cliente que conforman la palabra HELLO
             client[i].recv_buffer[0] = i;
