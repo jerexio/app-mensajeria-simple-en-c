@@ -19,6 +19,7 @@ bash Principal.sh
 Para generar certificados en un cliente externos
 bash Cli-externo.sh
 ```
+Asegurese de compartir las claves publicas de los clientes y almacenarlas en la carpeta external_pub_key
 
 ## ¿Como compilar y ejecutar?
 ### Cliente
